@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor · Audio Workstation</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/common.js"></script>
+</head>
+<body>
+<main>
+  <div class="grid" id="cards"></div>
+  <section class="panel">
+    <div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Jobs</h2><button id="clear">Clear finished</button></div>
+    <table><thead><tr><th>#</th><th>Type</th><th>Target</th><th>Status</th><th style="width:30%">Progress</th></tr></thead>
+    <tbody id="jobs"></tbody></table>
+  </section>
+  <section class="panel">
+    <h2>Settings</h2>
+    <p class="muted">Change these in the <code>.env</code> file next to <code>docker-compose.yml</code>, then run <code>docker compose up -d --build</code>.</p>
+    <table id="config"></table>
+  </section>
+</main>
+<script>
+header("monitor");
+const $ = id => document.getElementById(id);
+const pct = (a, b) => (a != null && b ? Math.round(100 * a / b) : null);
+const meter = p => p == null ? "" : `<div class="bar" style="margin-top:8px"><div style="width:${p}%"></div></div>`;
+
+async function load() {
+  const [sys, jobs] = await Promise.all([api("/api/system"), api("/api/jobs")]);
+  const { storage: st, memory: mem, cpu } = sys;
+  const used = st.disk_total - st.disk_free;
+  $("cards").innerHTML = `
+    <div class="panel"><div class="muted">Library</div><div class="big">${fmtBytes(st.library_bytes)}</div>
+      <div class="muted">${st.songs} songs · ${st.stems} tracks · ${st.collections} collections<br>AI models: ${fmtBytes(st.models_bytes)}</div></div>
+    <div class="panel"><div class="muted">Disk</div><div class="big">${fmtBytes(st.disk_free)} free</div>
+      <div class="muted">${fmtBytes(used)} of ${fmtBytes(st.disk_total)} used</div>${meter(pct(used, st.disk_total))}</div>
+    <div class="panel"><div class="muted">Container memory</div><div class="big">${fmtBytes(mem.used)}</div>
+      <div class="muted">limit ${mem.limit ? fmtBytes(mem.limit) : "none"}</div>${meter(pct(mem.used, mem.limit))}</div>
+    <div class="panel"><div class="muted">CPU load (1 / 5 / 15 min)</div><div class="big">${cpu.load.map(l => l.toFixed(1)).join(" / ")}</div>
+      <div class="muted">${cpu.cores} cores · ${sys.jobs.running} running, ${sys.jobs.queued} queued, ${sys.jobs.error} failed</div></div>`;
+
+  $("jobs").innerHTML = jobs.map(j => `<tr>
+      <td>${j.id}</td><td>${j.kind}</td>
+      <td>${j.kind === "split" ? `<a href="/song?id=${enc(j.target)}">${esc(j.target)}</a>` : esc(j.target)}</td>
+      <td><span class="badge ${j.status}">${j.status}</span></td>
+      <td>${j.status === "running" ? `<div class="bar"><div style="width:${j.progress}%"></div></div>` : ""}
+        <div class="muted">${j.status === "error" ? `<pre>${esc(j.message)}</pre>` : esc(j.message)}</div></td></tr>`).join("")
+    || `<tr><td colspan="5" class="muted">No jobs since the container started.</td></tr>`;
+
+  const cfg = { ...sys.config, speed: `${sys.config.speed.min}x – ${sys.config.speed.max}x, step ${sys.config.speed.step}, default ${sys.config.speed.default}x` };
+  $("config").innerHTML = Object.entries({ ...cfg, ...Object.fromEntries(Object.entries(sys.versions).map(([k, v]) => [`${k} version`, v])) })
+    .map(([k, v]) => `<tr><th>${esc(k.replaceAll("_", " "))}</th><td>${esc(v)}</td></tr>`).join("");
+}
+$("clear").onclick = async () => { await api("/api/jobs/finished", { method: "DELETE" }); load(); };
+load();
+setInterval(load, 2000);
+</script>
+</body>
+</html>

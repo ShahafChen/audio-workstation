@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audio Workstation</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/common.js"></script>
+</head>
+<body>
+<main>
+  <section class="panel">
+    <h2>Download from YouTube</h2>
+    <form id="dl" class="row">
+      <input id="url" type="url" class="grow" required placeholder="Song, playlist or album URL (YouTube or YouTube Music)">
+      <button class="primary">Download</button>
+    </form>
+    <p class="muted">Albums and playlists download every track and become a collection. Tip: YouTube Music album links give the best tags (artist, album, year, track number).</p>
+    <div id="active"></div>
+  </section>
+
+  <section class="panel">
+    <div class="row" style="margin-bottom:8px">
+      <select id="filter"></select>
+      <button id="newCol">New collection</button>
+      <button id="delCol" class="danger" hidden>Delete collection</button>
+      <span class="grow"></span>
+      <input id="search" type="text" placeholder="Search">
+    </div>
+    <div id="songs"></div>
+  </section>
+</main>
+
+<dialog id="edit">
+  <form method="dialog" id="editForm">
+    <h2>Edit details</h2>
+    <label>Title <input name="title"></label>
+    <label>Artist <input name="artist"></label>
+    <label>Album <input name="album"></label>
+    <div class="row">
+      <label class="grow">Year <input name="year"></label>
+      <label class="grow">Track # <input name="track"></label>
+    </div>
+    <label>Genre <input name="genre"></label>
+    <p class="muted">Saved into the MP3 file's tags too.</p>
+    <div class="row"><span class="grow"></span><button value="cancel" formnovalidate>Cancel</button><button class="primary" value="save">Save</button></div>
+  </form>
+</dialog>
+
+<script>
+header("library");
+let songs = [], collections = {}, editing = null, lastData = "";
+const $ = id => document.getElementById(id);
+
+async function load() {
+  const [newSongs, newCols, jobs] = await Promise.all([api("/api/songs"), api("/api/collections"), api("/api/jobs")]);
+  const data = JSON.stringify([newSongs, newCols, jobs]);
+  if (data === lastData) return;  // re-rendering would close an open dropdown
+  lastData = data; songs = newSongs; collections = newCols;
+  $("active").innerHTML = jobs.filter(j => j.kind === "download" && j.status !== "done").map(j =>
+    `<p class="muted">${j.status === "error" ? "❌" : "⏳"} ${esc(j.target)} — ${esc(j.status === "error" ? j.message : j.message || j.status)}</p>`).join("");
+  render();
+}
+
+function render() {
+  const current = $("filter").value;
+  $("filter").innerHTML = `<option value="">All songs (${songs.length})</option>` +
+    Object.entries(collections).map(([n, ids]) => `<option value="${esc(n)}">${esc(n)} (${ids.length})</option>`).join("");
+  $("filter").value = current in collections ? current : "";
+  const col = $("filter").value;
+  $("delCol").hidden = !col;
+  const q = $("search").value.toLowerCase();
+  const list = songs.filter(s => (!col || collections[col].includes(s.id)) &&
+    (!q || `${s.title} ${s.artist} ${s.album}`.toLowerCase().includes(q)));
+  const options = Object.keys(collections).map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  $("songs").innerHTML = list.map(s => `
+    <div class="song">
+      ${s.has_cover ? `<img class="cover" src="/media/${enc(s.id)}/cover.jpg" alt="">` : `<div class="cover"></div>`}
+      <div class="grow">
+        <div class="title"><a href="/song?id=${enc(s.id)}">${esc(s.title || s.id)}</a></div>
+        <div class="muted">${esc([s.artist, s.album, s.year].filter(Boolean).join(" · "))}
+          ${s.stems.length ? ` · ${s.stems.length} tracks` : ""}</div>
+      </div>
+      ${jobBadge(s.job)}
+      ${col ? `<button data-act="uncol" data-id="${esc(s.id)}">Remove from collection</button>` :
+        `<select data-act="col" data-id="${esc(s.id)}"><option value="">+ Collection</option>${options}</select>`}
+      <button data-act="edit" data-id="${esc(s.id)}">Edit</button>
+      <button data-act="del" data-id="${esc(s.id)}" class="danger">Delete</button>
+    </div>`).join("") || `<p class="muted">No songs yet. Paste a YouTube link above.</p>`;
+}
+
+$("dl").onsubmit = async e => {
+  e.preventDefault();
+  try { await api("/api/download", { method: "POST", body: { url: $("url").value } }); $("url").value = ""; load(); }
+  catch (err) { alert(err.message); }
+};
+$("filter").onchange = render;
+$("search").oninput = render;
+$("newCol").onclick = async () => {
+  const name = prompt("Collection name");
+  if (!name) return;
+  const res = await api("/api/collections", { method: "POST", body: { name } });
+  await load(); $("filter").value = res.name; render();
+};
+$("delCol").onclick = async () => {
+  const name = $("filter").value;
+  if (!confirm(`Delete collection "${name}"? The songs stay in your library.`)) return;
+  await api(`/api/collections/${enc(name)}`, { method: "DELETE" }); $("filter").value = ""; load();
+};
+
+$("songs").onclick = async e => {
+  const { act, id } = e.target.dataset;
+  try {
+    if (act === "del" && confirm("Delete this song and all its tracks?")) {
+      await api(`/api/songs/${enc(id)}`, { method: "DELETE" }); load();
+    } else if (act === "uncol") {
+      await api(`/api/collections/${enc($("filter").value)}/songs/${enc(id)}`, { method: "DELETE" }); load();
+    } else if (act === "edit") {
+      editing = songs.find(s => s.id === id);
+      for (const input of $("editForm").querySelectorAll("input")) input.value = editing[input.name] ?? "";
+      $("edit").showModal();
+    }
+  } catch (err) { alert(err.message); }
+};
+$("songs").onchange = async e => {
+  const { act, id } = e.target.dataset;
+  if (act === "col" && e.target.value) {
+    await api(`/api/collections/${enc(e.target.value)}/songs/${enc(id)}`, { method: "PUT" }); load();
+  }
+};
+$("edit").onclose = async () => {
+  if ($("edit").returnValue !== "save") return;
+  const body = Object.fromEntries(new FormData($("editForm")));
+  try { await api(`/api/songs/${enc(editing.id)}`, { method: "PATCH", body }); load(); } catch (err) { alert(err.message); }
+};
+
+load();
+setInterval(() => { if (!$("edit").open) load(); }, 3000);
+</script>
+</body>
+</html>

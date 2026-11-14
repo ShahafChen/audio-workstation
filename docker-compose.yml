@@ -1,0 +1,17 @@
+services:
+  audio-workstation:
+    build: .
+    image: audio-workstation:latest
+    container_name: audio-workstation
+    env_file: .env
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8080}:8080"
+    volumes:
+      # LIBRARY is either a volume name (stored inside Docker) or a host path (shared with your computer)
+      - "${LIBRARY:-audio-workstation-library}:/library"
+    mem_limit: "${MEMORY_LIMIT:-6g}"
+    restart: unless-stopped
+
+volumes:
+  audio-workstation-library:
+    name: audio-workstation-library

@@ -1,0 +1,5 @@
+fastapi==0.162.7
+uvicorn==0.54.0
+yt-dlp[default]==2026.10.26
+mutagen==1.48.1
+demucs==4.0.1
