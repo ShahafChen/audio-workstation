@@ -9,12 +9,14 @@ import re
 import shutil
 from pathlib import Path
 
+from mutagen._constants import GENRES
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3NoHeaderError
 
 ROOT = Path(os.environ.get("LIBRARY_DIR", "/library"))
 SONGS = ROOT / "songs"
 COLLECTIONS = ROOT / "collections"
+VALUES_FILE = ROOT / ".values.json"  # cache of every artist/album/year/genre in the library, for the edit dropdowns
 STEM_ORDER = ["vocals", "drums", "bass", "guitar", "piano", "other"]
 META_FIELDS = ["title", "artist", "album", "year", "track", "genre"]
 ID3_KEYS = {"title": "title", "artist": "artist", "album": "album", "year": "date",
@@ -24,6 +26,8 @@ ID3_KEYS = {"title": "title", "artist": "artist", "album": "album", "year": "dat
 def init():
     SONGS.mkdir(parents=True, exist_ok=True)
     COLLECTIONS.mkdir(parents=True, exist_ok=True)
+    if not VALUES_FILE.exists():
+        rebuild_values()
 
 
 def safe_name(text: str) -> str:
@@ -74,7 +78,27 @@ def write_meta(path: Path, updates: dict) -> dict:
         for key, value in tags.items():
             id3[ID3_KEYS[key]] = value
         id3.save(original)
+    rebuild_values()
     return meta
+
+
+def rebuild_values() -> dict:
+    found = {k: set() for k in ("artist", "album", "year", "genre")}
+    for p in SONGS.iterdir():
+        for key, value in read_meta(p).items():
+            if key in found and value:
+                found[key].add(str(value))
+    values = {k: sorted(v, key=str.lower) for k, v in found.items()}
+    values["genre"] = sorted(set(GENRES) | found["genre"], key=str.lower)
+    VALUES_FILE.write_text(json.dumps(values, ensure_ascii=False))
+    return values
+
+
+def values() -> dict:
+    try:
+        return json.loads(VALUES_FILE.read_text())
+    except (OSError, ValueError):
+        return rebuild_values()
 
 
 def stems(path: Path) -> list[str]:
@@ -115,6 +139,7 @@ def delete_song(song_id: str):
     shutil.rmtree(song_dir(song_id))
     for link in COLLECTIONS.glob(f"*/{song_id}"):
         link.unlink()
+    rebuild_values()
 
 
 # ── collections ──

@@ -25,12 +25,17 @@
     </div>
   </section>
   <section class="panel">
-    <h2>Tracks</h2>
+    <div class="row" style="margin-bottom:4px"><h2 class="grow" style="margin:0">Tracks</h2><button id="reset">Reset mix</button></div>
     <div id="tracks"></div>
+    <div class="row" style="margin-top:10px">
+      <button id="backing" class="primary">Download backing track</button>
+      <span class="muted">Mixes the tracks at the volumes above into one MP3 and saves it to your computer.</span>
+    </div>
   </section>
   <section class="panel row">
     <span class="grow muted" id="model"></span>
     <button id="resplit">Split again</button>
+    <button id="delete" class="danger">Delete song</button>
   </section>
 </main>
 
@@ -57,9 +62,12 @@ async function init() {
   $("speed").value = cfg.speed.default.toFixed(2);
   speed = +$("speed").value;
 
-  if (!song.stems.length) {
-    $("tracks").innerHTML = `<p class="muted">Tracks are not ready yet (${esc(song.job ? song.job.status + " " + song.job.progress + "%" : "not split")}). This page refreshes on its own.</p>`;
+  if (!song.stems.length && song.job && song.job.status !== "error") {
+    $("tracks").innerHTML = `<p class="muted">Tracks are being made (${esc(song.job.status)} ${song.job.progress}%). This page refreshes on its own.</p>`;
     setTimeout(() => location.reload(), 5000);
+  } else if (!song.stems.length) {
+    $("tracks").innerHTML = `<p class="muted">${song.job ? "Splitting failed: " + esc(song.job.message) : "This song was downloaded without splitting. Only the original plays."} Press <b>Split</b> below to make the separate tracks.</p>`;
+    $("resplit").textContent = "Split";
   }
   const names = [...song.stems, ...(song.has_original ? ["original"] : [])];
   tracks = names.map(name => {
@@ -68,14 +76,15 @@ async function init() {
     a.preservesPitch = true;
     const gain = ctx.createGain();
     ctx.createMediaElementSource(a).connect(gain).connect(ctx.destination);
-    const vol = name === "original" && song.stems.length ? 0 : 1;  // full mix starts muted when stems exist
+    const vol = name === "original" && song.stems.length ? 0 : 1;  // full mix starts silent when stems exist
     gain.gain.value = vol;
-    return { name, a, gain, vol };
+    return { name, a, gain, vol, muted: false };
   });
   $("tracks").insertAdjacentHTML("beforeend", tracks.map((t, i) => `
     <div class="track"><span>${esc(t.name)}</span>
       <input type="range" min="0" max="100" value="${t.vol * 100}" data-i="${i}" aria-label="${esc(t.name)} volume">
-      <span class="muted" id="v${i}">${t.vol * 100}%</span></div>`).join(""));
+      <span class="muted" id="v${i}">${t.vol * 100}%</span>
+      <label class="muted"><input type="checkbox" data-m="${i}"> mute</label></div>`).join(""));
 
   const master = tracks[0]?.a;
   if (!master) return;
@@ -127,11 +136,39 @@ $("play").onclick = () => setPlaying(!playing);
 $("speed").onchange = () => setSpeed($("speed").value);
 $("slower").onclick = () => { const i = $("speed").selectedIndex; if (i > 0) setSpeed($("speed").options[i - 1].value); };
 $("faster").onclick = () => { const s = $("speed"), i = s.selectedIndex; if (i < s.options.length - 1) setSpeed(s.options[i + 1].value); };
+function applyGain(i) {
+  const t = tracks[i];
+  t.gain.gain.value = t.muted ? 0 : t.vol;
+  document.querySelector(`[data-i="${i}"]`).value = t.vol * 100;
+  document.querySelector(`[data-m="${i}"]`).checked = t.muted;
+  $("v" + i).textContent = Math.round(t.vol * 100) + "%";
+}
 $("tracks").oninput = e => {
-  const i = e.target.dataset.i;
-  if (i === undefined) return;
-  tracks[i].gain.gain.value = e.target.value / 100;
-  $("v" + i).textContent = e.target.value + "%";
+  const { i, m } = e.target.dataset;
+  if (i !== undefined) tracks[i].vol = e.target.value / 100;
+  else if (m !== undefined) tracks[m].muted = e.target.checked;
+  else return;
+  applyGain(i ?? m);
+};
+$("reset").onclick = () => {
+  tracks.forEach((t, i) => { t.vol = t.name === "original" && tracks.length > 1 ? 0 : 1; t.muted = false; applyGain(i); });
+  setSpeed(1);
+};
+$("backing").onclick = async () => {
+  const gains = Object.fromEntries(tracks.map(t => [t.name, t.muted ? 0 : t.vol]));
+  $("backing").disabled = true; $("backing").textContent = "Mixing…";
+  try {
+    const res = await fetch(`/api/songs/${enc(songId)}/mix`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ gains }) });
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    const name = decodeURIComponent((res.headers.get("Content-Disposition") || "").match(/filename\*=utf-8''([^;]+)/i)?.[1] || "backing track.mp3");
+    const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(await res.blob()), download: name });
+    a.click(); URL.revokeObjectURL(a.href);
+  } catch (err) { alert(err.message); }
+  $("backing").disabled = false; $("backing").textContent = "Download backing track";
+};
+$("delete").onclick = async () => {
+  if (!confirm("Delete this song, its tracks and its collection entries? This cannot be undone.")) return;
+  try { await api(`/api/songs/${enc(songId)}`, { method: "DELETE" }); location.href = "/"; } catch (err) { alert(err.message); }
 };
 $("resplit").onclick = async () => {
   if (!confirm("Split this song again? Current tracks are replaced when it finishes.")) return;

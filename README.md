@@ -23,7 +23,8 @@ Everything runs on your machine. Nothing is uploaded anywhere.
 6. [Everyday commands](#everyday-commands)
 7. [Troubleshooting](#troubleshooting)
 8. [How it works](#how-it-works)
-9. [Legal note](#legal-note)
+9. [yt-dlp settings used](#yt-dlp-settings-used)
+10. [Legal note](#legal-note)
 
 ---
 
@@ -60,9 +61,14 @@ Paste a link into the box on the **Library** page and press **Download**. Any of
 | Album | `https://music.youtube.com/playlist?list=OLAK5uy_…` or `https://music.youtube.com/browse/MPREb_…` | Every track, plus a collection named after the album |
 | Playlist | `https://www.youtube.com/playlist?list=…` | Every video, plus a collection named after the playlist |
 
+Two options sit under the link box:
+
+- **Split into tracks** (on by default). Turn it off to only download the MP3. You can split it later from the song page.
+- **Add to** a collection. Pick one of your collections and every downloaded song lands in it. With *no collection*, an album or playlist link creates a collection named after the album or playlist.
+
 Each song is downloaded at the best audio quality YouTube offers and saved as a 320 kbps MP3.
+Only the audio stream is fetched; no video file is ever kept (see [yt-dlp settings used](#yt-dlp-settings-used)).
 The video thumbnail is embedded as cover art.
-When the download finishes, the song is queued for splitting automatically.
 Songs already in your library are skipped, so re-running an album link only fetches what is missing.
 
 ### Song details (metadata)
@@ -72,6 +78,7 @@ The app fills the MP3 tags (title, artist, album, year, track number) automatica
 - **YouTube Music links give the best results.** They carry real artist, album, year and track-number data.
 - **Plain YouTube videos** only have a video title. The app splits titles like `Artist - Song (Official Video)` into artist and title and drops the "(Official Video)" part.
 - **Anything missing or wrong:** press **Edit** next to the song. Your changes are written into the MP3 file's tags too, so they show up in any music player.
+- **Searchable dropdowns:** the Artist, Album and Year fields suggest every value already in your library as you type, and Genre suggests the 192 standard MP3 (ID3) genres plus any genre you typed before. You can always type a new value instead.
 
 To find an album link, search for the album on [music.youtube.com](https://music.youtube.com), open it, and copy the URL from the address bar.
 
@@ -80,20 +87,24 @@ To find an album link, search for the album on [music.youtube.com](https://music
 Click a song title to open its page.
 
 - **Play** starts all tracks at the same moment and keeps them locked together.
-- **Volume per track:** each track has its own slider from 0% to 100%. Drag vocals to 0 for karaoke, or solo the bass by turning the others down.
-- **Original** is the full mix. It starts muted when tracks exist, so you hear only the separate tracks.
+- **Volume per track:** each track has its own slider from 0% to 100% and a **mute** box. Mute the vocals for karaoke, or solo the bass by muting the others.
+- **Original** is the full mix. It starts at 0% when tracks exist, so you hear only the separate tracks.
 - **Speed** goes from 0.25x to 1.5x in steps of 0.05x. Use the dropdown or the − and + buttons. The pitch stays the same when you slow down.
+- **Reset mix** puts every track back to 100%, unmutes everything, and sets the speed to 1.0x.
+- **Download backing track** mixes the tracks exactly as you set them (volumes and mutes) into one MP3 and saves it to your computer. Mute the vocals and you get a karaoke version; keep only drums and bass and you get a rhythm section to play over. Speed is not applied to the file.
 - **Space** plays and pauses. The bar under the buttons seeks.
-- **Split again** re-runs the separation, for example after you switch to a better model.
+- **Split** / **Split again** runs the separation, for example for a song downloaded without splitting, or after you switch to a better model.
 - **Download MP3** saves the original song.
+- **Delete song** removes the song, its tracks and its entries in every collection. This is the only place a song can be deleted.
 
 ### Collections
 
 Collections group songs, like playlists. A song can be in any number of collections.
 
-- **New collection** on the Library page creates one.
-- **+ Collection** next to a song adds it to a collection.
-- Pick a collection in the dropdown to see only its songs. From there you can remove songs or delete the whole collection.
+- The list on the left of the Library page shows **All songs**, then every collection with its song count, then **+ New collection**.
+- Click a collection to see only its songs. **Delete collection** appears at the top while one is selected.
+- **Collections** next to a song opens a small window with a checkbox per collection. Tick to add, untick to remove.
+- The **Add to** dropdown under the download box puts new downloads straight into a collection.
 
 Deleting a collection never deletes songs.
 On disk, a collection is just a folder of shortcuts (symlinks) pointing at the song folders.
@@ -158,7 +169,8 @@ library/
 ├── collections/
 │   └── Abbey Road/
 │       └── The Beatles - Come Together → ../../songs/The Beatles - Come Together
-└── .models/                    ← downloaded AI models (cache)
+├── .models/                    ← downloaded AI models (cache)
+└── .values.json                ← every artist/album/year/genre in the library, for the edit dropdowns
 ```
 
 The `LIBRARY` setting in `.env` decides where that `library/` folder is.
@@ -193,7 +205,7 @@ On Docker Desktop for macOS, folders under `/Users` are shared by default.
 - **Disk:** free and used space where the library is stored.
 - **Container memory:** current use against the `MEMORY_LIMIT`.
 - **CPU load:** 1, 5 and 15 minute averages, and how many jobs are running, queued or failed.
-- **Jobs:** every download and split since the container started, with live progress and full error text for failures. **Clear finished** tidies the list.
+- **Jobs:** the 10 most recent downloads and splits, with live progress and full error text for failures. **View all jobs** shows the whole list. **Delete all jobs** clears the history and cancels anything still queued; a running job finishes.
 - **Settings:** the active configuration and the versions of yt-dlp, Demucs and PyTorch.
 
 Job history lives in memory and resets when the container restarts.
@@ -258,6 +270,34 @@ Browser ──HTTP──▶ FastAPI (one container) ──▶ job worker ──�
 - There is no database. The folders on disk are the source of truth.
 
 Developer documentation, including the API and how to add features, is in [docs/architecture.md](docs/architecture.md).
+
+---
+
+## yt-dlp settings used
+
+All downloading is done by [yt-dlp](https://github.com/yt-dlp/yt-dlp) through its Python API, in `app/jobs.py` (`download()`). These are the options it is called with:
+
+| Option | Value | Why |
+|---|---|---|
+| `format` | `bestaudio/best` | Fetch the best audio-only stream. Only if a video has no separate audio stream does it fall back to the best combined stream, which is then converted to audio. |
+| `outtmpl` | `/library/.incoming/<job>/<video id>.<ext>` | Downloads land in a temporary folder that is deleted when the job ends, even on failure. |
+| `writethumbnail` | `true` | Save the video thumbnail so it can become cover art. |
+| `postprocessors` → `FFmpegExtractAudio` | `preferredcodec: mp3`, `preferredquality: MP3_BITRATE` (default 320) | Convert the downloaded stream to MP3 at the bitrate from `.env`. |
+| `postprocessors` → `FFmpegThumbnailsConvertor` | `format: jpg`, `when: before_dl` | Turn the WebP thumbnail into `cover.jpg`. |
+| `postprocessors` → `EmbedThumbnail` | `already_have_thumbnail: true` | Embed the cover inside the MP3 and keep the separate `cover.jpg`. |
+| `keepvideo` | `false` | Delete the downloaded source stream once the MP3 exists. The video is never stored. |
+| `ignoreerrors` | `true` | One unavailable track in an album or playlist does not fail the rest. |
+| `match_filter` | skip when the video id is already in the library | Re-running an album link only fetches missing songs. |
+| `progress_hooks` | internal | Feeds the progress bar on the Monitor page. |
+| `quiet`, `noprogress` | `true` | Keep the container log readable. |
+
+The app reads these fields from the information yt-dlp returns for each video, to fill the song's tags:
+`track` or `title` (title), `artist` / `artists` / `uploader` / `channel` (artist; a trailing " - Topic" is removed), `album`, `release_year` or `upload_date` (year), `track_number` or the playlist position (track number), `genre`, `webpage_url` (source link), `id` (used to detect duplicates), `duration`, and the playlist `title` (name of the auto-created collection).
+
+Two things outside the options list also matter:
+
+- `YTDLP_AUTO_UPDATE=true` in `.env` runs `pip install -U yt-dlp` on every container start, because YouTube changes often.
+- The image contains the [Deno](https://deno.com) JavaScript runtime, which yt-dlp uses to solve YouTube's player challenges.
 
 ---
 

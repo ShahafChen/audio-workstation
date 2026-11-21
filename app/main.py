@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -42,6 +43,12 @@ def _name(name: str) -> str:
 
 class DownloadRequest(BaseModel):
     url: str = Field(pattern=r"^https?://", max_length=2000)
+    split: bool = True
+    collection: str | None = Field(None, max_length=120)
+
+
+class MixRequest(BaseModel):
+    gains: dict[str, float]  # track name -> volume 0..1; 0 or missing = left out
 
 
 class MetaUpdate(BaseModel):
@@ -114,6 +121,27 @@ def delete_song(song_id: str):
     return {"ok": True}
 
 
+@app.post("/api/songs/{song_id}/mix")
+def mix(song_id: str, body: MixRequest):
+    folder = _song(song_id)
+    allowed = set(lib.stems(folder)) | ({"original"} if (folder / "original.mp3").exists() else set())
+    gains = {name: max(0.0, min(1.0, g)) for name, g in body.gains.items() if name in allowed}
+    out = lib.ROOT / ".incoming" / f"mix-{os.getpid()}-{id(body)}.mp3"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        jobs.mixdown(folder, gains, out)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    title = lib.read_meta(folder).get("title") or song_id
+    return FileResponse(out, media_type="audio/mpeg", filename=f"{lib.safe_name(title)} (backing track).mp3",
+                        background=BackgroundTask(out.unlink, missing_ok=True))
+
+
+@app.get("/api/values")
+def get_values():
+    return lib.values()
+
+
 @app.post("/api/songs/{song_id}/split")
 def resplit(song_id: str):
     _song(song_id)
@@ -126,7 +154,10 @@ def resplit(song_id: str):
 
 @app.post("/api/download")
 def download(body: DownloadRequest):
-    return jobs.submit("download", body.url)
+    collection = body.collection and _name(body.collection)
+    if collection and not (lib.COLLECTIONS / collection).is_dir():
+        raise HTTPException(404, "collection not found")
+    return jobs.submit("download", body.url, split=body.split, collection=collection)
 
 
 @app.get("/api/jobs")
@@ -134,9 +165,9 @@ def list_jobs():
     return sorted(jobs.JOBS.values(), key=lambda j: j["created"], reverse=True)
 
 
-@app.delete("/api/jobs/finished")
-def clear_jobs():
-    jobs.clear_finished()
+@app.delete("/api/jobs")
+def delete_jobs():
+    jobs.delete_jobs()
     return {"ok": True}
 
 

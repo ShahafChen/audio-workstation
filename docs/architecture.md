@@ -11,12 +11,12 @@ Dockerfile            ← python:3.11-slim + ffmpeg + deno (for yt-dlp) + CPU to
 requirements.txt
 app/
   main.py             ← FastAPI routes, request models, /api/system monitor, static pages
-  jobs.py             ← in-memory job queue + single worker thread; download() and split()
-  library.py          ← all filesystem logic: song folders, meta.json + ID3 tags, collections (symlinks)
+  jobs.py             ← in-memory job queue + single worker thread; download(), split(), mixdown()
+  library.py          ← all filesystem logic: song folders, meta.json + ID3 tags, collections (symlinks), values cache
   static/
     common.js         ← api() fetch helper, formatting, shared header
     style.css         ← all styles; light/dark via prefers-color-scheme
-    index.html        ← Library: download form, collections, metadata editor
+    index.html        ← Library: download form (split + collection options), collections sidebar + dialog, metadata editor
     song.html         ← Player: per-track volume, speed, sync loop
     monitor.html      ← Monitor: storage, memory, CPU, jobs, active settings
 tests/test_core.py    ← self-check for library + metadata logic (plain asserts, also pytest-compatible)
@@ -31,16 +31,19 @@ No build step for the frontend: plain HTML + vanilla JS, served as static files.
 - `source_id` is the YouTube video id and is used to skip duplicates on download.
 - Stems are whatever `*.mp3` files exist in `stems/`. `library.STEM_ORDER` sets the display order.
 - A collection is a folder under `/library/collections/` holding relative symlinks `../../songs/<id>`.
-- `/library/.models` is the Demucs model cache (`TORCH_HOME`). `/library/.incoming/<job>` is a temporary download area, wiped on startup.
+- `/library/.models` is the Demucs model cache (`TORCH_HOME`). `/library/.incoming/<job>` is a temporary download and mixdown area, wiped on startup.
+- `/library/.values.json` caches every distinct artist/album/year plus the genre list (`mutagen._constants.GENRES`, 192 ID3 genres, merged with custom ones). `library.rebuild_values()` rewrites it after every `write_meta()` and `delete_song()`; `library.values()` reads it. The edit dialog's `<datalist>` dropdowns are filled from `/api/values`.
 
 ## Jobs
 
 `jobs.submit(kind, target)` puts a dict in `JOBS` and on the queue. One daemon thread processes jobs in order.
 
-- `download` (target = URL): yt-dlp Python API, best audio → MP3 at `MP3_BITRATE`, thumbnail → `cover.jpg` and embedded. For each entry it creates a song folder, writes metadata via `guess_meta()`, and submits a `split`. Playlists/albums also become a collection.
+- `download` (target = URL, options `split` and `collection`): yt-dlp Python API, best audio → MP3 at `MP3_BITRATE`, thumbnail → `cover.jpg` and embedded, `keepvideo=False`. For each entry it creates a song folder, writes metadata via `guess_meta()`, and submits a `split` unless `split` is false. Songs go into the chosen `collection`; without one, playlists/albums become their own collection.
 - `split` (target = song id): runs `python -m demucs` as a subprocess, parses tqdm `NN%|` output for progress, moves results into `stems/`.
 
-Job state is in memory (resets on restart). `jobs.start()` re-queues songs that have `original.mp3` but no stems.
+- `mixdown(folder, gains, out)` is not a job: `/api/songs/{id}/mix` calls it inline. It runs ffmpeg with a `volume` filter per track and `amix=normalize=0` (plain sum, which is how Demucs stems reconstruct the original), then streams the file back and deletes it.
+
+Job state is in memory (resets on restart). `jobs.start()` re-queues songs that have `original.mp3` but no stems. `jobs.delete_jobs()` drops every non-running job; the worker skips a queued job whose id is no longer in `JOBS`.
 
 ## API
 
@@ -51,10 +54,12 @@ Job state is in memory (resets on restart). `jobs.start()` re-queues songs that 
 | GET | `/api/songs/{id}` | One song |
 | PATCH | `/api/songs/{id}` | Update metadata (also writes ID3 tags) |
 | DELETE | `/api/songs/{id}` | Delete folder and its collection links (409 while splitting) |
-| POST | `/api/songs/{id}/split` | Queue a re-split |
-| POST | `/api/download` | `{url}` → queue a download job |
-| GET | `/api/jobs` | All jobs, newest first |
-| DELETE | `/api/jobs/finished` | Drop done/error jobs |
+| POST | `/api/songs/{id}/split` | Queue a (re-)split |
+| POST | `/api/songs/{id}/mix` | `{gains: {track: 0..1}}` → MP3 mixdown of the chosen tracks (file response) |
+| POST | `/api/download` | `{url, split=true, collection=null}` → queue a download job |
+| GET | `/api/jobs` | All jobs, newest first (the Monitor page shows 10 unless "View all") |
+| DELETE | `/api/jobs` | Drop finished jobs and cancel queued ones |
+| GET | `/api/values` | `{artist, album, year, genre}` lists for the edit dropdowns |
 | GET | `/api/collections` | `{name: [song ids]}` |
 | POST | `/api/collections` | `{name}` → create |
 | DELETE | `/api/collections/{name}` | Delete (songs untouched) |
@@ -66,7 +71,7 @@ Interactive API docs: `http://localhost:8080/docs`.
 
 ## Player sync (song.html)
 
-Each track is an `HTMLAudioElement` with `preservesPitch = true`, routed `MediaElementSource → GainNode → destination`. Volume uses the GainNode because iOS ignores `audio.volume`.
+Each track is an `HTMLAudioElement` with `preservesPitch = true`, routed `MediaElementSource → GainNode → destination`. Volume uses the GainNode because iOS ignores `audio.volume`. Each track keeps `vol` and `muted`; `applyGain()` sets the gain to `muted ? 0 : vol`. **Reset mix** restores the defaults (stems 100%, original 0%, speed 1.0). **Download backing track** posts the same `vol`/`muted` state as `gains` to `/mix`.
 Every 200 ms, `sync()` compares each track to track 0: drift over 15 ms nudges that track's `playbackRate` by up to ±5%, drift over 250 ms jumps it.
 If perfect sample-accurate sync is ever needed, the upgrade is decoding into `AudioBuffer`s and time-stretching in an AudioWorklet (more memory, more code).
 

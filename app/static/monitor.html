@@ -10,7 +10,7 @@
 <main>
   <div class="grid" id="cards"></div>
   <section class="panel">
-    <div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Jobs</h2><button id="clear">Clear finished</button></div>
+    <div class="row" style="margin-bottom:8px"><h2 class="grow" style="margin:0">Jobs</h2><button id="toggle"></button><button id="clear" class="danger">Delete all jobs</button></div>
     <table><thead><tr><th>#</th><th>Type</th><th>Target</th><th>Status</th><th style="width:30%">Progress</th></tr></thead>
     <tbody id="jobs"></tbody></table>
   </section>
@@ -24,6 +24,7 @@
 header("monitor");
 const $ = id => document.getElementById(id);
 const pct = (a, b) => (a != null && b ? Math.round(100 * a / b) : null);
+let showAll = false;
 const meter = p => p == null ? "" : `<div class="bar" style="margin-top:8px"><div style="width:${p}%"></div></div>`;
 
 async function load() {
@@ -40,7 +41,9 @@ async function load() {
     <div class="panel"><div class="muted">CPU load (1 / 5 / 15 min)</div><div class="big">${cpu.load.map(l => l.toFixed(1)).join(" / ")}</div>
       <div class="muted">${cpu.cores} cores · ${sys.jobs.running} running, ${sys.jobs.queued} queued, ${sys.jobs.error} failed</div></div>`;
 
-  $("jobs").innerHTML = jobs.map(j => `<tr>
+  $("toggle").textContent = showAll ? "Show 10 most recent" : `View all jobs (${jobs.length})`;
+  $("toggle").hidden = jobs.length <= 10;
+  $("jobs").innerHTML = (showAll ? jobs : jobs.slice(0, 10)).map(j => `<tr>
       <td>${j.id}</td><td>${j.kind}</td>
       <td>${j.kind === "split" ? `<a href="/song?id=${enc(j.target)}">${esc(j.target)}</a>` : esc(j.target)}</td>
       <td><span class="badge ${j.status}">${j.status}</span></td>
@@ -52,7 +55,11 @@ async function load() {
   $("config").innerHTML = Object.entries({ ...cfg, ...Object.fromEntries(Object.entries(sys.versions).map(([k, v]) => [`${k} version`, v])) })
     .map(([k, v]) => `<tr><th>${esc(k.replaceAll("_", " "))}</th><td>${esc(v)}</td></tr>`).join("");
 }
-$("clear").onclick = async () => { await api("/api/jobs/finished", { method: "DELETE" }); load(); };
+$("toggle").onclick = () => { showAll = !showAll; load(); };
+$("clear").onclick = async () => {
+  if (!confirm("Delete the job history and cancel queued jobs? A running job keeps going.")) return;
+  await api("/api/jobs", { method: "DELETE" }); load();
+};
 load();
 setInterval(load, 2000);
 </script>

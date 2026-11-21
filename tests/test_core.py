@@ -7,6 +7,7 @@ import tempfile
 os.environ["LIBRARY_DIR"] = tempfile.mkdtemp()
 
 from app import library as lib  # noqa: E402
+from app import jobs  # noqa: E402
 from app.jobs import guess_meta  # noqa: E402
 
 
@@ -57,6 +58,52 @@ def test_guess_meta():
     assert (m["artist"], m["title"], m["year"], m["track"], m["album"]) == ("Queen", "Bohemian Rhapsody", "2008", "", "")
     topic = {"id": "3", "title": "Song", "uploader": "Band - Topic"}
     assert guess_meta(topic)["artist"] == "Band"
+
+
+def test_values_cache():
+    lib.init()
+    d = lib.new_song_dir("Values Test")
+    lib.write_meta(d, {"title": "T", "artist": "Zed", "album": "Alpha", "year": "1999", "genre": "My Own Genre"})
+    v = lib.values()
+    assert "Zed" in v["artist"] and "Alpha" in v["album"] and "1999" in v["year"]
+    assert "Rock" in v["genre"] and "My Own Genre" in v["genre"]  # standard ID3 list + custom entries
+    lib.delete_song(d.name)
+    assert "Zed" not in lib.values()["artist"]
+
+
+def test_delete_jobs():
+    a = jobs.submit("split", "x")
+    jobs.JOBS[a["id"]]["status"] = "done"
+    b = jobs.submit("split", "y")  # still queued (worker not started in tests)
+    c = jobs.submit("split", "z", split=False, collection="C")
+    assert c["split"] is False and c["collection"] == "C"
+    jobs.JOBS[c["id"]]["status"] = "running"
+    jobs.delete_jobs()
+    assert list(jobs.JOBS) == [c["id"]]
+
+
+def test_mixdown():
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        print("skip test_mixdown: no ffmpeg")
+        return
+    d = lib.new_song_dir("Mix Test")
+    (d / "stems").mkdir()
+    for name in ("vocals", "drums"):
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                        "-b:a", "64k", str(d / "stems" / f"{name}.mp3")], check=True)
+    out = d / "mix.mp3"
+    jobs.mixdown(d, {"vocals": 0.5, "drums": 0}, out)
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(out)],
+                           capture_output=True, text=True, check=True)
+    assert 0.9 < float(probe.stdout) < 1.2, probe.stdout
+    try:
+        jobs.mixdown(d, {"vocals": 0, "drums": 0}, out)
+        raise AssertionError("all-muted mix should fail")
+    except ValueError:
+        pass
+    lib.delete_song(d.name)
 
 
 if __name__ == "__main__":

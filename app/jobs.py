@@ -22,16 +22,17 @@ _queue: queue.Queue = queue.Queue()
 _ids = itertools.count(1)
 
 
-def submit(kind: str, target: str) -> dict:
+def submit(kind: str, target: str, **options) -> dict:
     job = {"id": str(next(_ids)), "kind": kind, "target": target, "status": "queued",
-           "progress": 0, "message": "", "created": time.time(), "finished": None}
+           "progress": 0, "message": "", "created": time.time(), "finished": None, **options}
     JOBS[job["id"]] = job
     _queue.put(job)
     return job
 
 
-def clear_finished():
-    for jid in [j["id"] for j in JOBS.values() if j["status"] in ("done", "error")]:
+def delete_jobs():
+    """Forget finished jobs and cancel queued ones; a running job keeps going."""
+    for jid in [j["id"] for j in JOBS.values() if j["status"] != "running"]:
         del JOBS[jid]
 
 
@@ -43,6 +44,8 @@ def pending_split(song_id: str) -> bool:
 def _worker():
     while True:
         job = _queue.get()
+        if job["id"] not in JOBS:
+            continue  # deleted while queued
         job["status"] = "running"
         try:
             (download if job["kind"] == "download" else split)(job)
@@ -110,6 +113,7 @@ def download(job: dict):
             {"key": "EmbedThumbnail", "already_have_thumbnail": True},
         ],
         "match_filter": skip_existing,
+        "keepvideo": False,  # the source stream is deleted once the MP3 is extracted
         "ignoreerrors": True,  # one unavailable album track must not fail the whole album
         "progress_hooks": [on_progress],
         "quiet": True,
@@ -137,12 +141,14 @@ def download(job: dict):
             lib.write_meta(folder, meta | {"source_url": entry.get("webpage_url") or url,
                                            "source_id": entry["id"], "duration": entry.get("duration")})
             added.append(folder.name)
-            submit("split", folder.name)
+            if job.get("split", True):
+                submit("split", folder.name)
 
-        if is_playlist and added:
-            collection = lib.create_collection((info.get("title") or "Playlist").removeprefix("Album - "))
-            for song_id in added:
-                lib.add_to_collection(collection, song_id)
+        # a collection chosen by the user wins; otherwise an album/playlist becomes its own collection
+        collection = job.get("collection") or (
+            is_playlist and added and lib.create_collection((info.get("title") or "Playlist").removeprefix("Album - ")))
+        for song_id in added if collection else []:
+            lib.add_to_collection(collection, song_id)
         skipped = len(entries) - len(added)
         job["message"] = f"Added {len(added)} song(s)" + (f", skipped {skipped} (already in library or unavailable)" if skipped else "")
         if not added and not skipped:
@@ -179,3 +185,22 @@ def split(job: dict):
     shutil.rmtree(work, ignore_errors=True)
     lib.write_meta(folder, {"split_model": MODEL})
     job["message"] = f"{len(lib.stems(folder))} tracks"
+
+
+# ── mixdown (runs inline, a few seconds) ──
+
+def mixdown(folder, gains: dict[str, float], out) -> None:
+    """Sum the chosen tracks at the given volumes (0..1) into one MP3. Demucs stems sum back to the original."""
+    inputs = [(folder / ("original.mp3" if name == "original" else f"stems/{name}.mp3"), g)
+              for name, g in gains.items() if g > 0]
+    if not inputs:
+        raise ValueError("every track is muted")
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    for path, _ in inputs:
+        cmd += ["-i", str(path)]
+    chain = "".join(f"[{i}:a]volume={g:.3f}[a{i}];" for i, (_, g) in enumerate(inputs))
+    chain += "".join(f"[a{i}]" for i in range(len(inputs))) + f"amix=inputs={len(inputs)}:normalize=0[out]"
+    cmd += ["-filter_complex", chain, "-map", "[out]", "-b:a", f"{BITRATE}k", str(out)]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {result.stderr[-1000:]}")
